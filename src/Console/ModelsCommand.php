@@ -17,6 +17,8 @@ use Barryvdh\Reflection\DocBlock\Context;
 use Barryvdh\Reflection\DocBlock\Serializer as DocBlockSerializer;
 use Barryvdh\Reflection\DocBlock\Tag;
 use Composer\Autoload\ClassMapGenerator;
+use Doctrine\DBAL\Exception as DBALException;
+use Doctrine\DBAL\Types\Type;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Database\Eloquent\CastsAttributes;
 use Illuminate\Database\Eloquent\Factories\Factory;
@@ -76,7 +78,11 @@ class ModelsCommand extends Command
      * @var string
      */
     protected $name = 'ide-helper:models';
-    protected $filename = '_ide_helper_models.php';
+
+    /**
+     * @var string
+     */
+    protected $filename;
 
     /**
      * The console command description.
@@ -100,6 +106,10 @@ class ModelsCommand extends Command
      * @var bool[string]
      */
     protected $nullableColumns = [];
+    /**
+     * @var string[]
+     */
+    protected $foreignKeyConstraintsColumns = [];
 
     /**
      * During initialization we use Laravels Date Facade to
@@ -125,7 +135,8 @@ class ModelsCommand extends Command
      */
     public function handle()
     {
-        $filename = $this->option('filename');
+        $this->filename = $this->laravel['config']->get('ide-helper.models_filename', '_ide_helper_models.php');
+        $filename = $this->option('filename') ?? $this->filename;
         $this->write = $this->option('write');
         $this->write_mixin = $this->option('write-mixin');
         $this->dirs = array_merge(
@@ -193,7 +204,7 @@ class ModelsCommand extends Command
     protected function getOptions()
     {
         return [
-          ['filename', 'F', InputOption::VALUE_OPTIONAL, 'The path to the helper file', $this->filename],
+          ['filename', 'F', InputOption::VALUE_OPTIONAL, 'The path to the helper file'],
           ['dir', 'D', InputOption::VALUE_OPTIONAL | InputOption::VALUE_IS_ARRAY,
               'The model dir, supports glob patterns', [], ],
           ['write', 'W', InputOption::VALUE_NONE, 'Write to Model file'],
@@ -344,11 +355,24 @@ class ModelsCommand extends Command
     {
         $casts = $model->getCasts();
         foreach ($casts as $name => $type) {
+            if (Str::startsWith($type, 'decimal:')) {
+                $type = 'decimal';
+            } elseif (Str::startsWith($type, 'custom_datetime:')) {
+                $type = 'date';
+            } elseif (Str::startsWith($type, 'immutable_custom_datetime:')) {
+                $type = 'immutable_date';
+            } elseif (Str::startsWith($type, 'encrypted:')) {
+                $type = Str::after($type, ':');
+            }
             switch ($type) {
+                case 'encrypted':
+                    $realType = 'mixed';
+                    break;
                 case 'boolean':
                 case 'bool':
                     $realType = 'boolean';
                     break;
+                case 'decimal':
                 case 'string':
                     $realType = 'string';
                     break;
@@ -373,6 +397,10 @@ class ModelsCommand extends Command
                 case 'datetime':
                     $realType = $this->dateClass;
                     break;
+                case 'immutable_date':
+                case 'immutable_datetime':
+                    $realType = '\Carbon\CarbonImmutable';
+                    break;
                 case 'collection':
                     $realType = '\Illuminate\Support\Collection';
                     break;
@@ -381,6 +409,7 @@ class ModelsCommand extends Command
                     // the `$type` until the `:`
                     $type = strtok($type, ':');
                     $realType = class_exists($type) ? ('\\' . $type) : 'mixed';
+                    $this->setProperty($name, null, true, true);
                     break;
             }
 
@@ -415,6 +444,8 @@ class ModelsCommand extends Command
      * Load the properties from the database table.
      *
      * @param \Illuminate\Database\Eloquent\Model $model
+     *
+     * @throws DBALException If custom field failed to register
      */
     public function getPropertiesFromTable($model)
     {
@@ -426,6 +457,14 @@ class ModelsCommand extends Command
         $platformName = $databasePlatform->getName();
         $customTypes = $this->laravel['config']->get("ide-helper.custom_db_types.{$platformName}", []);
         foreach ($customTypes as $yourTypeName => $doctrineTypeName) {
+            try {
+                if (!Type::hasType($yourTypeName)) {
+                    Type::addType($yourTypeName, get_class(Type::getType($doctrineTypeName)));
+                }
+            } catch (DBALException $exception) {
+                $this->error("Failed registering custom db type \"$yourTypeName\" as \"$doctrineTypeName\"");
+                throw $exception;
+            }
             $databasePlatform->registerDoctrineTypeMapping($yourTypeName, $doctrineTypeName);
         }
 
@@ -440,6 +479,7 @@ class ModelsCommand extends Command
             return;
         }
 
+        $this->setForeignKeys($schema, $table);
         foreach ($columns as $column) {
             $name = $column->getName();
             if (in_array($name, $model->getDates())) {
@@ -714,6 +754,11 @@ class ModelsCommand extends Command
         $fkProp = $reflectionObj->getProperty('foreignKey');
         $fkProp->setAccessible(true);
 
+        if ($relation === 'belongsTo') {
+            return isset($this->nullableColumns[$fkProp->getValue($relationObj)]) ||
+                !in_array($fkProp->getValue($relationObj), $this->foreignKeyConstraintsColumns, true);
+        }
+
         return isset($this->nullableColumns[$fkProp->getValue($relationObj)]);
     }
 
@@ -891,6 +936,13 @@ class ModelsCommand extends Command
             if (!$phpdocMixin->getText()) {
                 $mixinDocComment = preg_replace("/\s\*\s*\n/", '', $mixinDocComment);
             }
+
+            foreach ($phpdoc->getTagsByName('mixin') as $tag) {
+                if (Str::startsWith($tag->getContent(), 'IdeHelper')) {
+                    $phpdoc->deleteTag($tag);
+                }
+            }
+            $docComment = $serializer->getDocComment($phpdoc);
         }
 
         if ($this->write) {
@@ -912,11 +964,15 @@ class ModelsCommand extends Command
         }
 
         $classname = $this->write_mixin ? $mixinClassName : $classname;
-        $output = "namespace {$namespace}{\n{$docComment}\n\t{$keyword}class {$classname} extends \Eloquent ";
+        $output = "namespace {$namespace}{\n{$docComment}\n\t{$keyword}class {$classname} ";
 
-        if ($interfaceNames) {
-            $interfaces = implode(', \\', $interfaceNames);
-            $output .= "implements \\{$interfaces} ";
+        if (!$this->write_mixin) {
+            $output .= "extends \Eloquent ";
+
+            if ($interfaceNames) {
+                $interfaces = implode(', \\', $interfaceNames);
+                $output .= "implements \\{$interfaces} ";
+            }
         }
 
         return $output . "{}\n}\n\n";
@@ -935,7 +991,8 @@ class ModelsCommand extends Command
         $paramsWithDefault = [];
         /** @var \ReflectionParameter $param */
         foreach ($method->getParameters() as $param) {
-            $paramStr = '$' . $param->getName();
+            $paramStr = $param->isVariadic() ? '...$' . $param->getName() : '$' . $param->getName();
+
             if ($paramType = $this->getParamType($method, $param)) {
                 $paramStr = $paramType . ' ' . $paramStr;
             }
@@ -1212,7 +1269,7 @@ class ModelsCommand extends Command
         ;
 
         $className = trim($className, '\\');
-        $writingToExternalFile = !$this->write;
+        $writingToExternalFile = !$this->write || $this->write_mixin;
         $classIsNotInExternalFile = $reflection->getName() !== $className;
         $forceFQCN = $this->laravel['config']->get('ide-helper.force_fqn', false);
 
@@ -1295,7 +1352,7 @@ class ModelsCommand extends Command
             $docComment ?? '',
             $matches
         );
-        $type = $matches[1] ?? null;
+        $type = $matches[1] ?? '';
 
         if (strpos($type, '|') !== false) {
             $types = explode('|', $type);
@@ -1394,6 +1451,20 @@ class ModelsCommand extends Command
             }
 
             $hookInstance->run($this, $model);
+        }
+    }
+
+    /**
+     * @param \Doctrine\DBAL\Schema\AbstractSchemaManager $schema
+     * @param string $table
+     * @throws DBALException
+     */
+    protected function setForeignKeys($schema, $table)
+    {
+        foreach ($schema->listTableForeignKeys($table) as $foreignKeyConstraint) {
+            foreach ($foreignKeyConstraint->getLocalColumns() as $columnName) {
+                $this->foreignKeyConstraintsColumns[] = $columnName;
+            }
         }
     }
 }

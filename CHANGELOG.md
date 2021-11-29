@@ -4,11 +4,29 @@ All notable changes to this project will be documented in this file.
 
 [Next release](https://github.com/barryvdh/laravel-ide-helper/compare/v2.10.0...master)
 --------------
+### Added
+- Add support for cast types `decimal:*`, `encrypted:*`, `immutable_date`, `immutable_datetime`, `custom_datetime`, and `immutable_custom_datetime` [#1262 / miken32](https://github.com/barryvdh/laravel-ide-helper/pull/1262)
+
 ### Fixed
 - Fix recursively searching for `HasFactory` and `Macroable` traits [\#1216 / daniel-de-wit](https://github.com/barryvdh/laravel-ide-helper/pull/1216)
 
 ### Fixed
 - Use platformName to determine db type when casting boolean types [\#1212 / stockalexander](https://github.com/barryvdh/laravel-ide-helper/pull/1212)
+
+### Added
+- Add support of variadic parameters in `ide-helper:models` [\#1234 / shaffe-fr](https://github.com/barryvdh/laravel-ide-helper/pull/1234)
+- Add support of custom casts without properties [\#1267 / sparclex](https://github.com/barryvdh/laravel-ide-helper/pull/1267)
+
+### Changed
+- Move default models helper filename to config [\#1241 / wimski](https://github.com/barryvdh/laravel-ide-helper/pull/1241)
+
+2021-06-18, 2.10.1
+------------------
+### Added
+- Added Type registration according to [Custom Mapping Types documentation](https://www.doctrine-project.org/projects/doctrine-dbal/en/latest/reference/types.html#custom-mapping-types)
+
+### Fixed
+- Fixing issue where configured custom_db_types could cause a DBAL exception to be thrown while running `ide-helper:models`
 
 2021-04-09, 2.10.0
 ------------------
@@ -40,6 +58,7 @@ All notable changes to this project will be documented in this file.
 - Generate PHPDoc for Laravel 8.x factories [\#1074 / ahmed-aliraqi](https://github.com/barryvdh/laravel-ide-helper/pull/1074)
 - Add a comment to a property like table columns [\#1168 / biiiiiigmonster](https://github.com/barryvdh/laravel-ide-helper/pull/1168)
 - Added `post_migrate` hook to run commands after a migration [\#1163 / netpok](https://github.com/barryvdh/laravel-ide-helper/pull/1163)
+- Allow for PhpDoc for macros with union types [\#1148 / riesjart](https://github.com/barryvdh/laravel-ide-helper/pull/1148)
 
 ### Fixed
 - Error when generating helper for invokable classes [\#1124 / standaniels](https://github.com/barryvdh/laravel-ide-helper/pull/1124)
